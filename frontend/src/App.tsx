@@ -1,7 +1,5 @@
 import React, { useState, useEffect } from 'react';
 import { Droplets, Thermometer, Cloud, Sprout, AlertCircle, Loader2 } from 'lucide-react';
-
-
 interface SensorData {
   raw: number;
   moisture: number;
@@ -23,7 +21,7 @@ export default function PlantMonitor() {
     timestamp: Date.now()
   });
   const [weather, setWeather] = useState<WeatherData>({
-    temperature: 28,
+    temperature: 25, // Fixed: default value
     humidity: 65,
     condition: 'Sunny'
   });
@@ -32,67 +30,107 @@ export default function PlantMonitor() {
   const [isLoadingAI, setIsLoadingAI] = useState(false);
   const [isWatering, setIsWatering] = useState(false);
   const [history, setHistory] = useState<number[]>([]);
+  const [data, setData] = useState({});
+  const [buzzerStatus, setBuzzerStatus] = useState('OFF');
 
- useEffect(() => {
-    // 1. Define the fetch function
+  // Fetch sensor data
+  useEffect(() => {
     const fetchSensorData = async () => {
-  try {
-    // 1. Fetch from ESP32
-    // Note: Ensure your ESP32 code handles CORS (Access-Control-Allow-Origin)
-    const response = await fetch('http://192.168.0.105/data'); 
-    
-    // 2. Check for HTTP errors (like 404 Not Found or 500 Server Error)
-    if (!response.ok) {
-      throw new Error(`HTTP error! Status: ${response.status}`);
-    }
+      try {
+        const response = await fetch('http://192.168.0.105/data'); 
+        
+        if (!response.ok) {
+          throw new Error(`HTTP error! Status: ${response.status}`);
+        }
 
-    // 3. Parse JSON
-    const data = await response.json(); 
-    console.log("Received from ESP32:", data);
+        const data1 = await response.json(); 
+        setData(data1);
+        console.log("Received from ESP32:", data);
 
-    // 4. FIX: Validate data before using it
-    // If 'raw' or 'moisture' are missing, default to 0 to prevent crashes
-    const rawVal = data.raw !== undefined ? data.raw : 0;
-    const moistureVal = data.moisture !== undefined ? data.moisture : 0;
+        // Extract data from the correct structure
+        const soilData = data1.soil || {};
+        const weatherData = data1.weather || {};
+        const buzzerData = data1.buzzer || {};
 
-    // 5. Update State
-    setSensorData({
-      raw: rawVal,
-      moisture: moistureVal,
-      // If moisture is 0 (missing), we might default to 'dry', or handle a specific 'error' status
-      status: moistureVal < 30 ? 'dry' : 'wet',
-      timestamp: Date.now()
-    });
+        // Update sensor data
+        setSensorData({
+          raw: soilData.raw !== undefined ? soilData.raw : 0,
+          moisture: soilData.moisture !== undefined ? soilData.moisture : 0,
+          status: soilData.status === 'LOW' ? 'dry' : 'wet',
+          timestamp: Date.now()
+        });
 
-    setHistory(prev => [...prev.slice(-20), moistureVal]);
+        // Update weather data
+        setWeather({
+          temperature: weatherData.temp_c !== undefined ? weatherData.temp_c : 25,
+          humidity: weatherData.humidity !== undefined ? weatherData.humidity : 65,
+          condition: getWeatherCondition(weatherData)
+        });
 
-  } catch (error) {
-    console.error("Failed to fetch sensor data:", error);
-    // Optional: You could update state here to show an "Offline" badge
-    // setSensorData(prev => ({ ...prev, status: 'offline' }));
-  }
-};
+        // Update buzzer status
+        setBuzzerStatus(buzzerData.state || 'OFF');
 
-    // 2. Call immediately on mount, then set interval
+        // Update history
+        const moistureVal = soilData.moisture !== undefined ? soilData.moisture : 0;
+        setHistory(prev => [...prev.slice(-20), moistureVal]);
+
+      } catch (error) {
+        console.error("Failed to fetch sensor data:", error);
+      }
+    };
+
     fetchSensorData();
     const interval = setInterval(fetchSensorData, 3000);
 
     return () => clearInterval(interval);
   }, []);
+
+  // Helper function for weather condition
+  const getWeatherCondition = (weatherData) => {
+    if (!weatherData) return 'Sunny';
+    
+    if (weatherData.humidity > 80) return 'Humid';
+    if (weatherData.temp_c > 30) return 'Hot';
+    if (weatherData.temp_c < 15) return 'Cool';
+    return 'Sunny';
+  };
+
   // Trigger ESP beep when moisture is low
   useEffect(() => {
     if (sensorData.moisture < 30 && sensorData.status === 'dry') {
-      // Send beep command to ESP32
-      fetch('http://your-esp32-ip/beep', { method: 'POST' })
-        .catch(err => console.log('ESP beep error:', err));
+      // Use the toggle endpoint to start beeping
+      fetch('http://192.168.0.105/buzzer/start', { 
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        }
+      })
+      .then(() => setBuzzerStatus('ON'))
+      .catch(err => console.log('ESP beep error:', err));
+    } else if (sensorData.moisture >= 30 && buzzerStatus === 'ON') {
+      // Stop beeping when moisture is adequate
+      fetch('http://192.168.0.105/buzzer/stop', { 
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        }
+      })
+      .then(() => setBuzzerStatus('OFF'))
+      .catch(err => console.log('ESP stop beep error:', err));
     }
   }, [sensorData.moisture, sensorData.status]);
 
   const handleWatering = async () => {
     setIsWatering(true);
     try {
-      // Send watering command to ESP32
-      await fetch('http://your-esp32-ip/water', { method: 'POST' });
+      // Note: You don't have a /water endpoint in your list
+      // You might need to create one or use /soil endpoint
+      console.log('Watering not implemented - add /water endpoint to ESP32');
+      // await fetch('http://192.168.0.105/water', { method: 'POST' });
+      
+      // For now, we'll use soil endpoint as an example
+      // Or you can add your own watering logic
+      
       setTimeout(() => setIsWatering(false), 3000);
     } catch (error) {
       console.error('Watering error:', error);
@@ -100,43 +138,119 @@ export default function PlantMonitor() {
     }
   };
 
-  const getAISuggestion = async () => {
-    setIsLoadingAI(true);
+  // Manual buzzer control functions
+  const startBeep = async () => {
     try {
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
+      await fetch('http://192.168.0.105/buzzer/start', { 
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+        }
+      });
+      setBuzzerStatus('ON');
+    } catch (error) {
+      console.error('Start beep error:', error);
+    }
+  };
+
+  const stopBeep = async () => {
+    try {
+      await fetch('http://192.168.0.105/buzzer/stop', { 
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        }
+      });
+      setBuzzerStatus('OFF');
+    } catch (error) {
+      console.error('Stop beep error:', error);
+    }
+  };
+
+  const toggleBeep = async () => {
+    try {
+      await fetch('http://192.168.0.105/buzzer/toggle', { 
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        }
+      });
+      setBuzzerStatus(prev => prev === 'ON' ? 'OFF' : 'ON');
+    } catch (error) {
+      console.error('Toggle beep error:', error);
+    }
+  };
+
+  const getAISuggestion = async () => {
+  setIsLoadingAI(true);
+
+  try {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GOOGLE_APIKEY}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 1000,
-          messages: [{
-            role: 'user',
-            content: `I'm growing ${plantType}. Current sensor readings:
-- Raw sensor value: ${sensorData.raw}
-- Moisture level: ${sensorData.moisture}%
-- Status: ${sensorData.status}
-- Weather: ${weather.temperature}°C, ${weather.humidity}% humidity, ${weather.condition}
+          contents: [
+            {
+              role: "user",
+              parts: [
+                {
+                  text: `
+You are an agricultural assistant for a smart irrigation system.
 
-Please provide brief, actionable advice on:
-1. Should I water the plant now?
-2. Any immediate concerns?
-3. Quick care tip for today's conditions
+Plant type: ${plantType}
 
-Keep it under 100 words.`
-          }]
-        })
-      });
+📊 Sensor Data:
+- Soil moisture percentage: ${soil.moisture}%
+- Soil status: ${soil.status}
+- Raw soil sensor value: ${soil.raw}
 
-      const data = await response.json();
-      const suggestion = data.content.find((item: any) => item.type === 'text')?.text || 'Unable to get suggestion';
-      setAiSuggestion(suggestion);
-    } catch (error) {
-      setAiSuggestion('Error connecting to AI. Check your API setup.');
-    }
-    setIsLoadingAI(false);
-  };
+🌦 Weather Conditions:
+- Location: ${weather.city}
+- Temperature: ${weather.temp_c} °C
+- Feels like: ${weather.feelslike_c} °C
+- Humidity: ${weather.humidity} %
+- Wind speed: ${weather.wind_kph} km/h
+- Atmospheric pressure: ${weather.pressure_mb} mb
+- Last weather update: ${weather.lastUpdate}
+
+🔔 System Status:
+- Buzzer state: ${buzzer.state}
+
+Please answer briefly and clearly:
+1. Should the plant be watered **right now**? (Yes/No + reason)
+2. Any **immediate risk** to the plant?
+3. One **quick actionable tip** for today’s conditions.
+4. Should the buzzer alert be turned ON or remain OFF?
+
+Keep the response under **100 words**.
+`
+                }
+              ]
+            }
+          ]
+        }),
+      }
+    );
+
+    const data = await response.json();
+    console.log("AI Response:", data);
+
+    const suggestion =
+      data.candidates?.[0]?.content?.parts?.[0]?.text ||
+      "Unable to get suggestion";
+
+    setAiSuggestion(suggestion);
+  } catch (error) {
+    setAiSuggestion("Error connecting to AI. Check your API key or network.");
+  }
+
+  setIsLoadingAI(false);
+};
+
 
   const getMoistureColor = (moisture: number) => {
     if (moisture < 30) return 'bg-red-500';
@@ -165,17 +279,22 @@ Keep it under 100 words.`
                 <p className="text-gray-500">IoT-powered plant care</p>
               </div>
             </div>
-            <select
-              value={plantType}
-              onChange={(e) => setPlantType(e.target.value)}
-              className="px-4 py-2 border-2 border-green-200 rounded-lg focus:outline-none focus:border-green-500"
-            >
-              <option>Tomato</option>
-              <option>Basil</option>
-              <option>Cactus</option>
-              <option>Orchid</option>
-              <option>Fern</option>
-            </select>
+            <div className="flex items-center gap-4">
+              <div className={`px-3 py-1 rounded-full ${buzzerStatus === 'ON' ? 'bg-red-100 text-red-800' : 'bg-green-100 text-green-800'}`}>
+                Buzzer: {buzzerStatus}
+              </div>
+              <select
+                value={plantType}
+                onChange={(e) => setPlantType(e.target.value)}
+                className="px-4 py-2 border-2 border-green-200 rounded-lg focus:outline-none focus:border-green-500"
+              >
+                <option>Tomato</option>
+                <option>Basil</option>
+                <option>Cactus</option>
+                <option>Orchid</option>
+                <option>Fern</option>
+              </select>
+            </div>
           </div>
         </div>
 
@@ -183,7 +302,7 @@ Keep it under 100 words.`
         {sensorData.moisture < 30 && (
           <div className={`bg-red-100 border-2 border-red-400 rounded-xl p-4 flex items-center gap-3 ${status.pulse ? 'animate-pulse' : ''}`}>
             <AlertCircle className="w-6 h-6 text-red-600" />
-            <span className="font-semibold text-red-800">Low moisture detected! ESP32 beeping. Water your plant immediately.</span>
+            <span className="font-semibold text-red-800">Low moisture detected! {buzzerStatus === 'ON' ? 'Buzzer is ON' : 'Starting buzzer...'}</span>
           </div>
         )}
 
@@ -205,7 +324,7 @@ Keep it under 100 words.`
               <div className="w-full bg-gray-200 rounded-full h-6 overflow-hidden">
                 <div
                   className={`h-full ${getMoistureColor(sensorData.moisture)} transition-all duration-500`}
-                  style={{ width: `${sensorData.moisture}%` }}
+                  style={{ width: `${Math.min(sensorData.moisture, 100)}%` }}
                 />
               </div>
 
@@ -230,7 +349,7 @@ Keep it under 100 words.`
                   <Thermometer className="w-5 h-5 text-red-500" />
                   <span className="text-gray-600">Temperature</span>
                 </div>
-                <span className="text-2xl font-bold text-gray-800">{weather.temperature}°C</span>
+                <span className="text-2xl font-bold text-gray-800">{weather.temperature.toFixed(1)}°C</span>
               </div>
 
               <div className="flex items-center justify-between">
@@ -261,7 +380,7 @@ Keep it under 100 words.`
               <button
                 onClick={handleWatering}
                 disabled={isWatering}
-                className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white font-bold py-4 px-6 rounded-xl transition-all transform hover:scale-105 active:scale-95 flex items-center justify-center gap-2"
+                className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white font-bold py-3 px-6 rounded-xl transition-all transform hover:scale-105 active:scale-95 flex items-center justify-center gap-2"
               >
                 {isWatering ? (
                   <>
@@ -279,7 +398,7 @@ Keep it under 100 words.`
               <button
                 onClick={getAISuggestion}
                 disabled={isLoadingAI}
-                className="w-full bg-purple-600 hover:bg-purple-700 disabled:bg-gray-400 text-white font-bold py-4 px-6 rounded-xl transition-all transform hover:scale-105 active:scale-95 flex items-center justify-center gap-2"
+                className="w-full bg-purple-600 hover:bg-purple-700 disabled:bg-gray-400 text-white font-bold py-3 px-6 rounded-xl transition-all transform hover:scale-105 active:scale-95 flex items-center justify-center gap-2"
               >
                 {isLoadingAI ? (
                   <>
@@ -293,6 +412,27 @@ Keep it under 100 words.`
                   </>
                 )}
               </button>
+
+              <div className="grid grid-cols-3 gap-2 pt-2">
+                <button
+                  onClick={startBeep}
+                  className="bg-red-100 hover:bg-red-200 text-red-700 font-semibold py-2 px-4 rounded-lg transition-colors"
+                >
+                  Start Beep
+                </button>
+                <button
+                  onClick={stopBeep}
+                  className="bg-green-100 hover:bg-green-200 text-green-700 font-semibold py-2 px-4 rounded-lg transition-colors"
+                >
+                  Stop Beep
+                </button>
+                <button
+                  onClick={toggleBeep}
+                  className="bg-yellow-100 hover:bg-yellow-200 text-yellow-700 font-semibold py-2 px-4 rounded-lg transition-colors"
+                >
+                  Toggle Beep
+                </button>
+              </div>
 
               <div className="text-xs text-gray-500 text-center pt-2">
                 Plant Type: <span className="font-semibold">{plantType}</span>
@@ -320,7 +460,7 @@ Keep it under 100 words.`
               <div key={index} className="flex-1 flex flex-col justify-end">
                 <div
                   className={`${getMoistureColor(value)} rounded-t transition-all duration-300`}
-                  style={{ height: `${value}%` }}
+                  style={{ height: `${Math.min(value, 100)}%` }}
                   title={`${value}%`}
                 />
               </div>
@@ -334,10 +474,14 @@ Keep it under 100 words.`
 
         {/* ESP32 Connection Info */}
         <div className="bg-gray-100 rounded-xl p-4 text-center text-sm text-gray-600">
-          <p>💡 <strong>Setup:</strong> Replace API endpoints with your ESP32 IP address</p>
-          <p className="mt-1">Sensor: <code className="bg-white px-2 py-1 rounded">http://your-esp32-ip/sensor</code></p>
-          <p className="mt-1">Water: <code className="bg-white px-2 py-1 rounded">http://your-esp32-ip/water</code></p>
-          <p className="mt-1">Beep: <code className="bg-white px-2 py-1 rounded">http://your-esp32-ip/beep</code></p>
+          <p>💡 <strong>Connected to ESP32 at:</strong> 192.168.0.105</p>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mt-2">
+            <div className="bg-white px-2 py-1 rounded"><code>/data</code> ✓</div>
+            <div className="bg-white px-2 py-1 rounded"><code>/buzzer/start</code> ✓</div>
+            <div className="bg-white px-2 py-1 rounded"><code>/buzzer/stop</code> ✓</div>
+            <div className="bg-white px-2 py-1 rounded"><code>/buzzer/toggle</code> ✓</div>
+          </div>
+          <p className="mt-2">Buzzer Status: <span className={`font-bold ${buzzerStatus === 'ON' ? 'text-red-600' : 'text-green-600'}`}>{buzzerStatus}</span></p>
         </div>
       </div>
     </div>
